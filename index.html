@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ひとことノート — 실습 1단계</title>
+<title>ひとことノート — 실습 2단계</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Noto+Sans+KR:wght@400;600&display=swap" rel="stylesheet">
 <style>
@@ -37,13 +37,14 @@
     padding: 0.7rem 1.4rem; font: inherit; font-weight: 600; cursor: pointer;
     color: #fff; background: var(--seal); border: none; border-radius: 6px;
   }
+  button:disabled { opacity: 0.6; cursor: wait; }
   /* 공책 줄처럼 보이는 글 목록 */
   ul { list-style: none; padding: 0; margin: 0; border-top: 1.5px solid var(--line); }
   li {
     display: flex; justify-content: space-between; gap: 1rem; align-items: baseline;
     padding: 0.8rem 0.2rem; border-bottom: 1.5px solid var(--line);
   }
-  li .text { font-family: "Klee One", serif; font-size: 1.2rem; }
+  li .text { font-family: "Klee One", serif; font-size: 1.2rem; overflow-wrap: anywhere; }
   li .who  { color: var(--muted); font-size: 0.9rem; white-space: nowrap; }
   .empty { color: var(--muted); padding: 1rem 0.2rem; }
 </style>
@@ -54,26 +55,49 @@
   <p class="sub">오늘 수업의 감상을 일본어 한 줄로 남겨 주세요.</p>
 
   <div class="form">
-    <input id="msg"  placeholder="例) 今日の授業は楽しかったです。">
-    <input id="name" placeholder="이름">
+    <input id="msg"  placeholder="例) 今日の授業は楽しかったです。" maxlength="100">
+    <input id="name" placeholder="이름" maxlength="20">
     <button id="add" type="button">남기기</button>
   </div>
   <p id="hint" class="hint" aria-live="polite"></p>
 
-  <ul id="list"></ul>
+  <ul id="list"><li class="empty">불러오는 중…</li></ul>
 </main>
 
-<script>
+<script type="module">
+  // Firebase를 브라우저에서 바로 불러오는 주소(CDN) 방식
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, addDoc, serverTimestamp,
+    query, orderBy, limit, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // ★ 창고 주소표 ★ — 공개되어도 괜찮은 값. 창고를 지키는 건 Firestore 규칙표입니다.
+  const firebaseConfig = {
+    apiKey: "AIzaSyBOm5e8wNlQXEUZAFuIUCY8z6ORfomQnDE",
+    authDomain: "guestbook-c1821.firebaseapp.com",
+    projectId: "guestbook-c1821",
+    storageBucket: "guestbook-c1821.firebasestorage.app",
+    messagingSenderId: "885558917691",
+    appId: "1:885558917691:web:bb4e479e05364edfcb7a1e"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
   // ★ 실습 포인트 ★
-  // 남긴 글은 이 배열(entries)에 들어갑니다.
-  // 그런데 이 배열은 "지금 이 브라우저의 메모리" 안에만 있어요.
-  // → 새로고침하면 원본 파일을 다시 받아오므로 빈 배열로 돌아갑니다.
-  // → 다른 사람의 컴퓨터에는 이 배열이 아예 없습니다.
-  const entries = [];
+  // 실습 1에서는 글을 브라우저 메모리의 entries 배열에 넣었습니다.
+  // 이제는 Firestore 창고의 "entries"라는 칸에 보냅니다.
+  // → 새로고침해도, 다른 기기에서 열어도, 같은 창고를 보므로 글이 남아 있습니다.
+  const entriesRef = collection(db, "entries");
 
   const list = document.getElementById("list");
+  const msg  = document.getElementById("msg");
+  const name = document.getElementById("name");
+  const hint = document.getElementById("hint");
+  const btn  = document.getElementById("add");
 
-  function render() {
+  function render(entries) {
     list.innerHTML = "";
     if (entries.length === 0) {
       list.innerHTML = '<li class="empty">아직 남긴 글이 없어요. 첫 줄을 남겨 보세요.</li>';
@@ -92,31 +116,46 @@
     }
   }
 
-  const msg  = document.getElementById("msg");
-  const name = document.getElementById("name");
-  const hint = document.getElementById("hint");
+  // 창고를 계속 지켜보다가, 누가 글을 남기면 모든 화면에 바로 반영합니다.
+  const latest = query(entriesRef, orderBy("createdAt", "desc"), limit(50));
+  onSnapshot(latest,
+    (snapshot) => render(snapshot.docs.map((d) => d.data())),
+    (err) => {
+      console.error(err);
+      list.innerHTML = '<li class="empty">글을 불러오지 못했어요. Firestore 규칙이 게시되었는지 확인해 주세요.</li>';
+    }
+  );
 
-  function addEntry() {
-    if (!msg.value.trim() || !name.value.trim()) {
+  async function addEntry() {
+    const m = msg.value.trim();
+    const n = name.value.trim();
+    if (!m || !n) {
       hint.textContent = "감상과 이름을 모두 적어 주세요.";
       return;
     }
     hint.textContent = "";
-    entries.unshift({ msg: msg.value.trim(), name: name.value.trim() });
-    msg.value = "";
-    msg.focus();
-    render();
+    btn.disabled = true;
+    try {
+      // 창고로 보내는 순간 Firebase 서버의 규칙표 검사를 받습니다.
+      await addDoc(entriesRef, { msg: m, name: n, createdAt: serverTimestamp() });
+      msg.value = "";
+      msg.focus();
+    } catch (err) {
+      console.error(err);
+      hint.textContent = err.code === "permission-denied"
+        ? "규칙표에 막혔어요. 길이(감상 100자, 이름 20자)나 Firestore 규칙을 확인해 주세요."
+        : "저장하지 못했어요. 잠시 후 다시 시도해 주세요.";
+    } finally {
+      btn.disabled = false;
+    }
   }
 
-  document.getElementById("add").addEventListener("click", addEntry);
-  // 입력칸에서 Enter를 눌러도 남겨지도록
+  btn.addEventListener("click", addEntry);
   [msg, name].forEach((el) =>
     el.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) addEntry();
     })
   );
-
-  render();
 </script>
 </body>
 </html>
